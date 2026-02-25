@@ -6,22 +6,23 @@ import os
 
 from data import GERUND_ONLY, INFINITIVE_ONLY, ALL_STRICT_VERBS, VERB_TO_CATEGORY, get_random_verb
 
+# Настройка логирования
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # --------- Токен с сервера ---------
 TOKEN = os.environ.get("BOT_TOKEN")  # Берём токен с переменной окружения
 
 if not TOKEN:
-    raise RuntimeError("❌ Ошибка: на сервере не установлена переменная BOT_TOKEN!")
+    logging.error("❌ Ошибка: на сервере не установлена переменная BOT_TOKEN!")
+    exit(1)  # корректно завершаем скрипт
 
 bot = telebot.TeleBot(TOKEN)
-
 user_data = {}
 
+# ---- Функции ----
 def reset_user(uid):
     user_data[uid] = {'score': 0, 'mode': None}
 
-# ---- клавиатуры ----
 def main_menu_keyboard():
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=1)
     markup.add(
@@ -40,7 +41,7 @@ def back_keyboard():
     )
     return markup
 
-# ---- вопросы и проверки ----
+# ---- Вопросы ----
 def send_translate_question(uid):
     verb = get_random_verb()
     user_data[uid]['current_verb'] = verb
@@ -96,7 +97,7 @@ def send_quiz_question(uid):
                      reply_markup=markup,
                      parse_mode='Markdown')
 
-# ---- хендлеры ----
+# ---- Обработчики сообщений ----
 @bot.message_handler(commands=['start'])
 def cmd_start(message):
     uid = message.chat.id
@@ -119,13 +120,11 @@ def main_handler(message):
     if uid not in user_data:
         reset_user(uid)
 
-    # Статистика
     if text == "Статистика":
         score = user_data[uid].get('score', 0)
         bot.send_message(uid, f"Твой счёт: **{score}** очков", parse_mode='Markdown')
         return
 
-    # Выбор режима
     if text == "1. Перевод (вписать)":
         user_data[uid]['mode'] = 'translate'
         send_translate_question(uid)
@@ -139,14 +138,13 @@ def main_handler(message):
         send_quiz_question(uid)
         return
 
-    # Ответы
     mode = user_data[uid].get('mode')
     if mode == 'translate':
         check_translate_answer(uid, text)
     else:
         bot.send_message(uid, "Выбери вариант через кнопки или меню 👇", reply_markup=back_keyboard())
 
-# ---- обработка Inline кнопок ----
+# ---- Обработчик inline кнопок ----
 @bot.callback_query_handler(func=lambda call: True)
 def callback_query(call):
     uid = call.message.chat.id
@@ -180,7 +178,7 @@ def callback_query(call):
                                       show_alert=True)
         send_quiz_question(uid)
 
-# ---- запуск бота ----
+# ---- Запуск бота ----
 if __name__ == '__main__':
     logging.info("Бот стартовал")
     try:
