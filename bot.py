@@ -8,7 +8,7 @@ from data import GERUND_ONLY, INFINITIVE_ONLY, ALL_STRICT_VERBS, VERB_TO_CATEGOR
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-TOKEN = os.environ.get("TOKEN")  
+TOKEN = os.environ.get("BOT_TOKEN")  
 bot = telebot.TeleBot(TOKEN)
 
 user_data = {}
