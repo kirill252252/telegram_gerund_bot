@@ -2,13 +2,18 @@ import telebot
 from telebot import types
 import logging
 import random
-import os  # <-- добавили
+import os
 
 from data import GERUND_ONLY, INFINITIVE_ONLY, ALL_STRICT_VERBS, VERB_TO_CATEGORY, get_random_verb
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-TOKEN = os.environ.get("BOT_TOKEN")  
+# --------- Токен с сервера ---------
+TOKEN = os.environ.get("BOT_TOKEN")  # Берём токен с переменной окружения
+
+if not TOKEN:
+    raise RuntimeError("❌ Ошибка: на сервере не установлена переменная BOT_TOKEN!")
+
 bot = telebot.TeleBot(TOKEN)
 
 user_data = {}
