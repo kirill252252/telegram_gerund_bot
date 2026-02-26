@@ -1,5 +1,10 @@
 import random
 
+<<<<<<< HEAD
+=======
+# Словари для бота
+
+>>>>>>> 015acfc6e3dd49545edef6d0e6a1ce8ed2760145
 GERUND_ONLY = {
     'abhor': 'испытывать отвращение к',
     'acknowledge': 'признавать',
@@ -133,6 +138,7 @@ INFINITIVE_ONLY = {
     'yearn': 'страстно желать'
 }
 
+<<<<<<< HEAD
 IRREGULAR_VERBS = {
     "be": ("was/were", "been", "быть"),
     "become": ("became", "become", "становиться"),
@@ -181,6 +187,8 @@ IRREGULAR_VERBS = {
     "write": ("wrote", "written", "писать")
 }
 
+=======
+>>>>>>> 015acfc6e3dd49545edef6d0e6a1ce8ed2760145
 ALL_STRICT_VERBS = {**GERUND_ONLY, **INFINITIVE_ONLY}
 VERB_TO_CATEGORY = {v: 'gerund' for v in GERUND_ONLY}
 VERB_TO_CATEGORY.update({v: 'infinitive' for v in INFINITIVE_ONLY})
