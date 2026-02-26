@@ -49,7 +49,7 @@ def main_menu_keyboard():
         types.KeyboardButton("1. Перевод (вписать)"),
         types.KeyboardButton("2. Gerund или Infinitive"),
         types.KeyboardButton("3. Выбор из 4 вариантов"),
-        types.KeyboardButton("4. Неправильные глаголы (по шагам)")
+        types.KeyboardButton("4. Неправильные глаголы")
     )
     markup.add(types.KeyboardButton("Статистика"))
     return markup
@@ -286,4 +286,3 @@ def callback_query(call):
 if __name__ == '__main__':
     logging.info("Бот стартовал")
     bot.infinity_polling(timeout=15, long_polling_timeout=5)
-    
