@@ -141,7 +141,7 @@ def check_achievements(uid, context: dict):
     row = db_get(uid)
     if not row:
         return
-    _, total, *_, xp, level, best_streak, _, daily_streak, nickname, best_ta, *_ = row
+    uid2, total, tr, gi, qz, irr, xp, level, best_streak, last_date, daily_streak, nickname, best_ta, reminder, weekly, weekly_reset = row
 
     checks = [
         ('first_correct',  total >= 1),
@@ -835,7 +835,7 @@ def main_handler(message):
         if not row:
             bot.send_message(uid, "Начни отвечать на вопросы!")
             return
-        _, total, tr, gi, qz, irr, xp, level, best_streak, _, daily_streak, nickname, best_ta, reminder, weekly, _ = row
+        uid2, total, tr, gi, qz, irr, xp, level, best_streak, last_date, daily_streak, nickname, best_ta, reminder, weekly, weekly_reset = row
         xp_to_next = 100 - (xp % 100)
         nick_line = f"✏️ Никнейм: *{nickname}*\n" if nickname else ""
 
