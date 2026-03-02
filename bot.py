@@ -7,7 +7,7 @@ import sqlite3
 import time
 from datetime import date, timedelta
 
-from data import GERUND_ONLY, INFINITIVE_ONLY, IRREGULAR_VERBS, ALL_STRICT_VERBS, VERB_TO_CATEGORY, get_random_verb
+from data import GERUND_ONLY, INFINITIVE_ONLY, IRREGULAR_VERBS, ALL_STRICT_VERBS, VERB_TO_CATEGORY, get_random_verb, get_accepted_translations
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -271,11 +271,21 @@ def check_translate(uid, text):
     verb = user_data[uid].get('current_verb')
     if not verb:
         return
-    correct = ALL_STRICT_VERBS[verb].lower()
-    if normalize(text) in correct:
+    
+    accepted = get_accepted_translations(verb)
+    user_input = normalize(text)
+    
+    correct = any(
+        user_input == a or user_input in a or a in user_input
+        for a in accepted
+    )
+    
+    if correct:
         msg = on_correct(uid, 'translate')
     else:
-        msg = on_wrong(uid, verb, ALL_STRICT_VERBS[verb])
+        main_translation = ALL_STRICT_VERBS[verb]
+        msg = on_wrong(uid, verb, main_translation)
+    
     bot.send_message(uid, msg, parse_mode='Markdown')
     maybe_summary(uid)
     send_translate_q(uid)
