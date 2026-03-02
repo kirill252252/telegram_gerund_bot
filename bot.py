@@ -19,7 +19,7 @@ if not TOKEN:
 bot = telebot.TeleBot(TOKEN)
 
 # ─────────────────────────────────────────────
-# DATABASE (SQLite — persists across restarts)
+# DATABASE
 # ─────────────────────────────────────────────
 DB_PATH = "bot_data.db"
 
@@ -37,7 +37,8 @@ def init_db():
         level INTEGER DEFAULT 1,
         best_streak INTEGER DEFAULT 0,
         last_active_date TEXT DEFAULT '',
-        daily_streak INTEGER DEFAULT 0
+        daily_streak INTEGER DEFAULT 0,
+        nickname TEXT DEFAULT ''
     )''')
     c.execute('''CREATE TABLE IF NOT EXISTS mistakes (
         uid INTEGER,
@@ -46,6 +47,11 @@ def init_db():
         PRIMARY KEY (uid, verb)
     )''')
     conn.commit()
+    try:
+        c.execute("ALTER TABLE users ADD COLUMN nickname TEXT DEFAULT ''")
+        conn.commit()
+    except sqlite3.OperationalError:
+        pass
     conn.close()
 
 init_db()
@@ -138,6 +144,21 @@ def db_leaderboard(limit=10):
     conn.close()
     return rows
 
+def db_set_nickname(uid, nickname):
+    db_ensure(uid)
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("UPDATE users SET nickname=? WHERE uid=?", (nickname, uid))
+    conn.commit()
+    conn.close()
+
+def db_get_nickname(uid):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT nickname FROM users WHERE uid=?", (uid,))
+    row = c.fetchone()
+    conn.close()
+    return row[0] if row and row[0] else None
+
 # ─────────────────────────────────────────────
 # IN-MEMORY SESSION STATE
 # ─────────────────────────────────────────────
@@ -180,11 +201,10 @@ def get_xp(uid):
     diff = user_data[uid].get('difficulty', 'normal')
     streak = user_data[uid].get('streak', 0)
     base = {'easy': 5, 'normal': 10, 'hard': 20}.get(diff, 10)
-    bonus = min(streak // 5, 5) * 5  # +5 XP per 5-streak, max +25
+    bonus = min(streak // 5, 5) * 5
     return base + bonus
 
 def get_weighted_verb(uid):
-    """30% chance to pick a previously-mistaken verb (spaced repetition)"""
     mistakes = db_get_mistakes(uid, limit=20)
     mistake_verbs = [m[0] for m in mistakes if m[0] in ALL_STRICT_VERBS]
     if mistake_verbs and random.random() < 0.3:
@@ -199,8 +219,8 @@ def main_menu_keyboard():
     m.add("1. Перевод (вписать)", "2. Gerund или Infinitive")
     m.add("3. Выбор из 4 вариантов", "4. Неправильные глаголы")
     m.add("⏱ Таймер-атака", "📊 Статистика")
-    m.add("🏆 Лидерборд", "⚙️ Настройки")
-    m.add("📋 Мои ошибки")
+    m.add("🏆 Таблица лидеров", "⚙️ Настройки")
+    m.add("📋 Мои ошибки", "✏️ Никнейм")
     return m
 
 def back_keyboard():
@@ -244,7 +264,6 @@ def on_wrong(uid, verb, correct):
     return f"❌ Неправильно. Правильный ответ: *{correct}*"
 
 def maybe_summary(uid):
-    """Show session summary every 10 questions"""
     count = user_data[uid]['session_count']
     if count > 0 and count % 10 == 0:
         c = user_data[uid]['session_correct']
@@ -271,21 +290,13 @@ def check_translate(uid, text):
     verb = user_data[uid].get('current_verb')
     if not verb:
         return
-    
     accepted = get_accepted_translations(verb)
     user_input = normalize(text)
-    
-    correct = any(
-        user_input == a or user_input in a or a in user_input
-        for a in accepted
-    )
-    
+    correct = any(user_input == a or user_input in a or a in user_input for a in accepted)
     if correct:
         msg = on_correct(uid, 'translate')
     else:
-        main_translation = ALL_STRICT_VERBS[verb]
-        msg = on_wrong(uid, verb, main_translation)
-    
+        msg = on_wrong(uid, verb, ALL_STRICT_VERBS[verb])
     bot.send_message(uid, msg, parse_mode='Markdown')
     maybe_summary(uid)
     send_translate_q(uid)
@@ -351,7 +362,7 @@ def handle_irregular(uid, text):
         start_irregular(uid)
 
 # ─────────────────────────────────────────────
-# TIME ATTACK MODE
+# TIME ATTACK
 # ─────────────────────────────────────────────
 def start_time_attack(uid):
     user_data[uid]['mode'] = 'time_attack'
@@ -391,9 +402,11 @@ def check_ta(uid, text):
     if not verb:
         send_ta_q(uid)
         return
-    correct = ALL_STRICT_VERBS[verb].lower()
+    accepted = get_accepted_translations(verb)
+    user_input = normalize(text)
+    correct = any(user_input == a or user_input in a or a in user_input for a in accepted)
     remaining = int(60 - elapsed)
-    if normalize(text) in correct:
+    if correct:
         user_data[uid]['time_attack_score'] += 1
         bot.send_message(uid, f"✅ | ⏱ {remaining}с")
     else:
@@ -410,8 +423,11 @@ def cmd_start(message):
     daily_streak = db_update_daily(uid)
     row = db_get(uid)
     level = row[7] if row else 1
+    nickname = db_get_nickname(uid) or "не задан"
     bot.send_message(uid,
-        f"👋 Привет!\n\n🏅 Уровень: {get_level_name(level)}\n📅 Дней подряд: {daily_streak}\n\nВыбери режим:",
+        f"👋 Привет!\n\n🏅 Уровень: {get_level_name(level)}\n"
+        f"✏️ Никнейм: {nickname}\n"
+        f"📅 Дней подряд: {daily_streak}\n\nВыбери режим:",
         reply_markup=main_menu_keyboard())
 
 @bot.message_handler(func=lambda m: m.text in ["Назад в меню", "назад", "меню"])
@@ -430,15 +446,37 @@ def main_handler(message):
     if uid not in user_data:
         reset_user(uid)
 
+    # ── Никнейм ──
+    if text == "✏️ Никнейм":
+        current = db_get_nickname(uid)
+        msg = f"Текущий никнейм: *{current}*\n\n" if current else "У тебя пока нет никнейма.\n\n"
+        msg += "Напиши новый никнейм (до 20 символов):"
+        user_data[uid]['mode'] = 'set_nickname'
+        bot.send_message(uid, msg, reply_markup=back_keyboard(), parse_mode='Markdown')
+        return
+
+    if user_data[uid].get('mode') == 'set_nickname':
+        if 1 <= len(text) <= 20:
+            db_set_nickname(uid, text)
+            user_data[uid]['mode'] = None
+            bot.send_message(uid, f"✅ Никнейм установлен: *{text}*",
+                             reply_markup=main_menu_keyboard(), parse_mode='Markdown')
+        else:
+            bot.send_message(uid, "❌ Никнейм должен быть от 1 до 20 символов. Попробуй ещё раз:")
+        return
+
+    # ── Статистика ──
     if text == "📊 Статистика":
         row = db_get(uid)
         if not row:
             bot.send_message(uid, "Начни отвечать на вопросы!")
             return
-        _, total, tr, gi, qz, irr, xp, level, best_streak, _, daily_streak = row
+        _, total, tr, gi, qz, irr, xp, level, best_streak, _, daily_streak, nickname = row
         xp_to_next = 100 - (xp % 100)
+        nick_line = f"✏️ Никнейм: *{nickname}*\n" if nickname else ""
         bot.send_message(uid,
             f"📊 *Статистика:*\n\n"
+            f"{nick_line}"
             f"🏅 {get_level_name(level)}\n"
             f"⚡ XP: {xp} (до след. уровня: {xp_to_next})\n"
             f"📅 Дней подряд: {daily_streak}\n"
@@ -449,6 +487,7 @@ def main_handler(message):
             parse_mode='Markdown')
         return
 
+    # ── Мои ошибки ──
     if text == "📋 Мои ошибки":
         mistakes = db_get_mistakes(uid)
         if not mistakes:
@@ -461,20 +500,23 @@ def main_handler(message):
         bot.send_message(uid, msg, parse_mode='Markdown')
         return
 
-    if text == "🏆 Лидерборд":
+    # ── Лидерборд ──
+    if text == "🏆 Таблица лидеров":
         rows = db_leaderboard()
         if not rows:
-            bot.send_message(uid, "Лидерборд пуст. Будь первым!")
+            bot.send_message(uid, "Таблица лидеров пуста. Будь первым!")
             return
         medals = ["🥇", "🥈", "🥉"]
         msg = "🏆 *Топ игроков:*\n\n"
         for i, (u, score, level) in enumerate(rows):
             medal = medals[i] if i < 3 else f"{i+1}."
+            nickname = db_get_nickname(u) or f"Игрок {str(u)[-4:]}"
             marker = " ← ты" if u == uid else ""
-            msg += f"{medal} {get_level_name(level)} — {score} очков{marker}\n"
+            msg += f"{medal} *{nickname}* — {get_level_name(level)} — {score} очков{marker}\n"
         bot.send_message(uid, msg, parse_mode='Markdown')
         return
 
+    # ── Настройки ──
     if text == "⚙️ Настройки":
         diff = user_data[uid].get('difficulty', 'normal')
         bot.send_message(uid,
@@ -495,6 +537,7 @@ def main_handler(message):
         bot.send_message(uid, "Сложность: 🔴 Сложно", reply_markup=main_menu_keyboard())
         return
 
+    # ── Выбор режима ──
     if text == "1. Перевод (вписать)":
         user_data[uid]['mode'] = 'translate'
         send_translate_q(uid)
@@ -514,6 +557,7 @@ def main_handler(message):
         start_time_attack(uid)
         return
 
+    # ── Обработка ответов ──
     mode = user_data[uid].get('mode')
     if mode == 'translate':
         check_translate(uid, text)
@@ -524,6 +568,9 @@ def main_handler(message):
     else:
         bot.send_message(uid, "Выбери режим через меню 👇", reply_markup=main_menu_keyboard())
 
+# ─────────────────────────────────────────────
+# CALLBACK HANDLERS
+# ─────────────────────────────────────────────
 @bot.callback_query_handler(func=lambda call: True)
 def callback_query(call):
     uid = call.message.chat.id
@@ -558,6 +605,9 @@ def callback_query(call):
         maybe_summary(uid)
         send_quiz_q(uid)
 
+# ─────────────────────────────────────────────
+# LAUNCH
+# ─────────────────────────────────────────────
 if __name__ == '__main__':
     logging.info("Бот стартовал")
     bot.infinity_polling(timeout=15, long_polling_timeout=5)
