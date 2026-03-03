@@ -858,4 +858,5 @@ def callback_query(call):
 # ─────────────────────────────────────────────
 if __name__ == '__main__':
     logging.info("Бот стартовал")
+    bot.delete_webhook(drop_pending_updates=True)  # ← добавь эту строку
     bot.infinity_polling(timeout=15, long_polling_timeout=5)
