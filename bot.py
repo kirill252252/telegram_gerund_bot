@@ -5,10 +5,20 @@ import random
 import os
 import sqlite3
 import time
+import re
 from datetime import date, timedelta
 from threading import Thread
 
 from data import GERUND_ONLY, INFINITIVE_ONLY, IRREGULAR_VERBS, ALL_STRICT_VERBS, VERB_TO_CATEGORY, get_random_verb, get_accepted_translations
+from users import (
+    user_ensure, user_get, user_get_all_uids, user_is_banned,
+    user_add_score, user_update_streak, user_update_best_streak,
+    user_update_best_ta, user_reset_weekly_if_needed,
+    user_set_nickname, user_set_reminder, user_get_all_reminders,
+    user_leaderboard, user_display_name,
+    db_give_achievement, db_get_achievements,
+    DB_PATH
+)
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -20,218 +30,10 @@ if not TOKEN:
 bot = telebot.TeleBot(TOKEN)
 
 # ─────────────────────────────────────────────
-# DATABASE
+# MISTAKES HELPERS (остаются здесь — не в users.py)
 # ─────────────────────────────────────────────
-DB_PATH = "bot_data.db"
-
-def init_db():
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS users (
-        uid INTEGER PRIMARY KEY,
-        total_score INTEGER DEFAULT 0,
-        translate_score INTEGER DEFAULT 0,
-        ger_inf_score INTEGER DEFAULT 0,
-        quiz_score INTEGER DEFAULT 0,
-        irregular_score INTEGER DEFAULT 0,
-        xp INTEGER DEFAULT 0,
-        level INTEGER DEFAULT 1,
-        best_streak INTEGER DEFAULT 0,
-        last_active_date TEXT DEFAULT '',
-        daily_streak INTEGER DEFAULT 0,
-        nickname TEXT DEFAULT '',
-        best_time_attack INTEGER DEFAULT 0,
-        reminder_time TEXT DEFAULT '',
-        weekly_score INTEGER DEFAULT 0,
-        weekly_reset_date TEXT DEFAULT ''
-    )''')
-    c.execute('''CREATE TABLE IF NOT EXISTS mistakes (
-        uid INTEGER,
-        verb TEXT,
-        wrong_count INTEGER DEFAULT 1,
-        PRIMARY KEY (uid, verb)
-    )''')
-    c.execute('''CREATE TABLE IF NOT EXISTS achievements (
-        uid INTEGER,
-        achievement TEXT,
-        earned_at TEXT,
-        PRIMARY KEY (uid, achievement)
-    )''')
-    c.execute('''CREATE TABLE IF NOT EXISTS daily_scores (
-        uid INTEGER,
-        score_date TEXT,
-        score INTEGER DEFAULT 0,
-        PRIMARY KEY (uid, score_date)
-    )''')
-    conn.commit()
-    # Migrations
-    migrations = [
-        "ALTER TABLE users ADD COLUMN nickname TEXT DEFAULT ''",
-        "ALTER TABLE users ADD COLUMN best_time_attack INTEGER DEFAULT 0",
-        "ALTER TABLE users ADD COLUMN reminder_time TEXT DEFAULT ''",
-        "ALTER TABLE users ADD COLUMN weekly_score INTEGER DEFAULT 0",
-        "ALTER TABLE users ADD COLUMN weekly_reset_date TEXT DEFAULT ''",
-    ]
-    for m in migrations:
-        try:
-            c.execute(m)
-            conn.commit()
-        except sqlite3.OperationalError:
-            pass
-    conn.close()
-
-init_db()
-
-# ─────────────────────────────────────────────
-# ACHIEVEMENTS DEFINITION
-# ─────────────────────────────────────────────
-ACHIEVEMENTS = {
-    'first_correct':     ('🌟 Первый шаг',        'Ответь правильно 1 раз'),
-    'score_100':         ('💯 Сотня',              'Набери 100 очков'),
-    'score_500':         ('🚀 Пятьсот',            'Набери 500 очков'),
-    'score_1000':        ('💎 Тысячник',           'Набери 1000 очков'),
-    'streak_5':          ('🔥 Серия x5',           '5 правильных подряд'),
-    'streak_10':         ('⚡ Серия x10',          '10 правильных подряд'),
-    'streak_20':         ('🌪️ Серия x20',          '20 правильных подряд'),
-    'streak_50':         ('👑 Серия x50',          '50 правильных подряд'),
-    'daily_3':           ('📅 3 дня подряд',       'Заходи 3 дня подряд'),
-    'daily_7':           ('🗓️ Неделя',             'Заходи 7 дней подряд'),
-    'daily_30':          ('🏆 Месяц',              'Заходи 30 дней подряд'),
-    'time_attack_10':    ('⏱️ Быстрый',            '10+ правильных в таймер-атаке'),
-    'time_attack_20':    ('⚡ Молния',             '20+ правильных в таймер-атаке'),
-    'time_attack_30':    ('🚀 Ракета',             '30+ правильных в таймер-атаке'),
-    'level_2':           ('📖 Ученик',             'Достигни 2 уровня'),
-    'level_5':           ('💎 Эксперт',            'Достигни 5 уровня'),
-    'survival_10':       ('🛡️ Выживший',          'Доживи до 10 вопроса в выживании'),
-    'survival_25':       ('⚔️ Воин',              'Доживи до 25 вопроса в выживании'),
-    'mistakes_clean':    ('✨ Без ошибок',         'Ответь на 10 вопросов без единой ошибки'),
-    'all_modes':         ('🎯 Мультиплеер',        'Сыграй во все режимы'),
-}
-
-def db_give_achievement(uid, key):
-    """Returns True if this is a NEW achievement"""
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("SELECT 1 FROM achievements WHERE uid=? AND achievement=?", (uid, key))
-    exists = c.fetchone()
-    if not exists:
-        c.execute("INSERT INTO achievements(uid,achievement,earned_at) VALUES(?,?,?)",
-                  (uid, key, str(date.today())))
-        conn.commit()
-        conn.close()
-        return True
-    conn.close()
-    return False
-
-def db_get_achievements(uid):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("SELECT achievement FROM achievements WHERE uid=?", (uid,))
-    rows = c.fetchall()
-    conn.close()
-    return [r[0] for r in rows]
-
-def notify_achievement(uid, key):
-    name, desc = ACHIEVEMENTS[key]
-    bot.send_message(uid, f"🏅 *Новое достижение!*\n{name}\n_{desc}_", parse_mode='Markdown')
-
-def check_achievements(uid, context: dict):
-    """Check and award achievements based on context dict"""
-    earned = db_get_achievements(uid)
-    row = db_get(uid)
-    if not row:
-        return
-    uid2, total, tr, gi, qz, irr, xp, level, best_streak, last_date, daily_streak, nickname, best_ta, reminder, weekly, weekly_reset = row
-
-    checks = [
-        ('first_correct',  total >= 1),
-        ('score_100',      total >= 100),
-        ('score_500',      total >= 500),
-        ('score_1000',     total >= 1000),
-        ('streak_5',       best_streak >= 5),
-        ('streak_10',      best_streak >= 10),
-        ('streak_20',      best_streak >= 20),
-        ('streak_50',      best_streak >= 50),
-        ('daily_3',        daily_streak >= 3),
-        ('daily_7',        daily_streak >= 7),
-        ('daily_30',       daily_streak >= 30),
-        ('time_attack_10', best_ta >= 10),
-        ('time_attack_20', best_ta >= 20),
-        ('time_attack_30', best_ta >= 30),
-        ('level_2',        level >= 2),
-        ('level_5',        level >= 5),
-        ('survival_10',    context.get('survival_q', 0) >= 10),
-        ('survival_25',    context.get('survival_q', 0) >= 25),
-        ('mistakes_clean', context.get('clean_streak', 0) >= 10),
-        ('all_modes',      context.get('all_modes', False)),
-    ]
-    for key, condition in checks:
-        if condition and key not in earned:
-            if db_give_achievement(uid, key):
-                notify_achievement(uid, key)
-
-# ─────────────────────────────────────────────
-# DB HELPERS
-# ─────────────────────────────────────────────
-def db_ensure(uid):
-    conn = sqlite3.connect(DB_PATH)
-    conn.execute("INSERT OR IGNORE INTO users (uid) VALUES (?)", (uid,))
-    conn.commit()
-    conn.close()
-
-def db_get(uid):
-    db_ensure(uid)
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("SELECT * FROM users WHERE uid=?", (uid,))
-    row = c.fetchone()
-    conn.close()
-    return row
-
-def db_add_score(uid, total=0, translate=0, ger_inf=0, quiz=0, irregular=0, xp=0):
-    db_ensure(uid)
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    today = str(date.today())
-    c.execute('''UPDATE users SET
-        total_score=total_score+?, translate_score=translate_score+?,
-        ger_inf_score=ger_inf_score+?, quiz_score=quiz_score+?,
-        irregular_score=irregular_score+?, xp=xp+?,
-        weekly_score=weekly_score+?
-        WHERE uid=?''', (total, translate, ger_inf, quiz, irregular, xp, total, uid))
-    # Daily score tracking
-    c.execute('''INSERT INTO daily_scores(uid,score_date,score) VALUES(?,?,?)
-                 ON CONFLICT(uid,score_date) DO UPDATE SET score=score+?''',
-              (uid, today, total, total))
-    c.execute("SELECT xp, level FROM users WHERE uid=?", (uid,))
-    row = c.fetchone()
-    new_level = None
-    if row:
-        xp_total, level = row
-        calc = 1 + xp_total // 100
-        if calc != level:
-            c.execute("UPDATE users SET level=? WHERE uid=?", (calc, uid))
-            new_level = calc
-    conn.commit()
-    conn.close()
-    return new_level
-
-def db_update_best_streak(uid, streak):
-    db_ensure(uid)
-    conn = sqlite3.connect(DB_PATH)
-    conn.execute("UPDATE users SET best_streak=MAX(best_streak,?) WHERE uid=?", (streak, uid))
-    conn.commit()
-    conn.close()
-
-def db_update_best_ta(uid, score):
-    db_ensure(uid)
-    conn = sqlite3.connect(DB_PATH)
-    conn.execute("UPDATE users SET best_time_attack=MAX(best_time_attack,?) WHERE uid=?", (score, uid))
-    conn.commit()
-    conn.close()
 
 def db_add_mistake(uid, verb):
-    db_ensure(uid)
     conn = sqlite3.connect(DB_PATH)
     conn.execute('''INSERT INTO mistakes(uid,verb,wrong_count) VALUES(?,?,1)
                     ON CONFLICT(uid,verb) DO UPDATE SET wrong_count=wrong_count+1''', (uid, verb))
@@ -246,111 +48,107 @@ def db_get_mistakes(uid, limit=10):
     conn.close()
     return rows
 
-def db_update_daily(uid):
-    db_ensure(uid)
-    today = str(date.today())
-    yesterday = str(date.today() - timedelta(days=1))
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("SELECT last_active_date, daily_streak FROM users WHERE uid=?", (uid,))
-    row = c.fetchone()
-    streak = 1
-    if row:
-        last, ds = row
-        if last == today:
-            conn.close()
-            return ds
-        streak = ds + 1 if last == yesterday else 1
-    c.execute("UPDATE users SET last_active_date=?, daily_streak=? WHERE uid=?", (today, streak, uid))
-    conn.commit()
-    conn.close()
-    return streak
-
-def db_reset_weekly_if_needed(uid):
-    db_ensure(uid)
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("SELECT weekly_reset_date FROM users WHERE uid=?", (uid,))
-    row = c.fetchone()
-    today = date.today()
-    monday = str(today - timedelta(days=today.weekday()))
-    if row and row[0] != monday:
-        c.execute("UPDATE users SET weekly_score=0, weekly_reset_date=? WHERE uid=?", (monday, uid))
-        conn.commit()
-    conn.close()
-
-def db_leaderboard(limit=10, weekly=False):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    col = "weekly_score" if weekly else "total_score"
-    c.execute(f"SELECT uid,{col},level FROM users ORDER BY {col} DESC LIMIT ?", (limit,))
-    rows = c.fetchall()
-    conn.close()
-    return rows
-
-def db_set_nickname(uid, nickname):
-    db_ensure(uid)
-    conn = sqlite3.connect(DB_PATH)
-    conn.execute("UPDATE users SET nickname=? WHERE uid=?", (nickname, uid))
-    conn.commit()
-    conn.close()
-
-def db_get_nickname(uid):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("SELECT nickname FROM users WHERE uid=?", (uid,))
-    row = c.fetchone()
-    conn.close()
-    return row[0] if row and row[0] else None
-
-def db_set_reminder(uid, time_str):
-    db_ensure(uid)
-    conn = sqlite3.connect(DB_PATH)
-    conn.execute("UPDATE users SET reminder_time=? WHERE uid=?", (time_str, uid))
-    conn.commit()
-    conn.close()
-
-def db_get_all_reminders():
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("SELECT uid, reminder_time FROM users WHERE reminder_time != ''")
-    rows = c.fetchall()
-    conn.close()
-    return rows
-
 def db_get_daily_scores(uid, days=7):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    dates = [str(date.today() - timedelta(days=i)) for i in range(days-1, -1, -1)]
     rows = []
-    for d in dates:
+    for i in range(days - 1, -1, -1):
+        d = str(date.today() - timedelta(days=i))
         c.execute("SELECT score FROM daily_scores WHERE uid=? AND score_date=?", (uid, d))
         r = c.fetchone()
         rows.append((d, r[0] if r else 0))
     conn.close()
     return rows
 
-def db_get_all_users():
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("SELECT uid FROM users")
-    rows = c.fetchall()
-    conn.close()
-    return [r[0] for r in rows]
+# ─────────────────────────────────────────────
+# ACHIEVEMENTS
+# ─────────────────────────────────────────────
+ACHIEVEMENTS = {
+    'first_correct':  ('🌟 Первый шаг',   'Ответь правильно 1 раз'),
+    'score_100':      ('💯 Сотня',         'Набери 100 очков'),
+    'score_500':      ('🚀 Пятьсот',       'Набери 500 очков'),
+    'score_1000':     ('💎 Тысячник',      'Набери 1000 очков'),
+    'streak_5':       ('🔥 Серия x5',      '5 правильных подряд'),
+    'streak_10':      ('⚡ Серия x10',     '10 правильных подряд'),
+    'streak_20':      ('🌪️ Серия x20',     '20 правильных подряд'),
+    'streak_50':      ('👑 Серия x50',     '50 правильных подряд'),
+    'daily_3':        ('📅 3 дня подряд',  'Заходи 3 дня подряд'),
+    'daily_7':        ('🗓️ Неделя',        'Заходи 7 дней подряд'),
+    'daily_30':       ('🏆 Месяц',         'Заходи 30 дней подряд'),
+    'time_attack_10': ('⏱️ Быстрый',       '10+ правильных в таймер-атаке'),
+    'time_attack_20': ('⚡ Молния',        '20+ правильных в таймер-атаке'),
+    'time_attack_30': ('🚀 Ракета',        '30+ правильных в таймер-атаке'),
+    'level_2':        ('📖 Ученик',        'Достигни 2 уровня'),
+    'level_5':        ('💎 Эксперт',       'Достигни 5 уровня'),
+    'survival_10':    ('🛡️ Выживший',     'Доживи до 10 вопроса в выживании'),
+    'survival_25':    ('⚔️ Воин',         'Доживи до 25 вопроса в выживании'),
+    'mistakes_clean': ('✨ Без ошибок',    'Ответь на 10 вопросов без единой ошибки'),
+    'all_modes':      ('🎯 Мультиплеер',   'Сыграй во все режимы'),
+}
+
+def notify_achievement(uid, key):
+    name, desc = ACHIEVEMENTS[key]
+    bot.send_message(uid, f"🏅 *Новое достижение!*\n{name}\n_{desc}_", parse_mode='Markdown')
+
+def check_achievements(uid, context: dict):
+    earned = db_get_achievements(uid)
+    row = user_get(uid)
+    if not row:
+        return
+
+    checks = [
+        ('first_correct',  row['total_score'] >= 1),
+        ('score_100',      row['total_score'] >= 100),
+        ('score_500',      row['total_score'] >= 500),
+        ('score_1000',     row['total_score'] >= 1000),
+        ('streak_5',       row['best_streak'] >= 5),
+        ('streak_10',      row['best_streak'] >= 10),
+        ('streak_20',      row['best_streak'] >= 20),
+        ('streak_50',      row['best_streak'] >= 50),
+        ('daily_3',        row['daily_streak'] >= 3),
+        ('daily_7',        row['daily_streak'] >= 7),
+        ('daily_30',       row['daily_streak'] >= 30),
+        ('time_attack_10', row['best_time_attack'] >= 10),
+        ('time_attack_20', row['best_time_attack'] >= 20),
+        ('time_attack_30', row['best_time_attack'] >= 30),
+        ('level_2',        row['level'] >= 2),
+        ('level_5',        row['level'] >= 5),
+        ('survival_10',    context.get('survival_q', 0) >= 10),
+        ('survival_25',    context.get('survival_q', 0) >= 25),
+        ('mistakes_clean', context.get('clean_streak', 0) >= 10),
+        ('all_modes',      context.get('all_modes', False)),
+    ]
+    for key, condition in checks:
+        if condition and key not in earned:
+            if db_give_achievement(uid, key):
+                notify_achievement(uid, key)
 
 # ─────────────────────────────────────────────
 # IN-MEMORY SESSION STATE
 # ─────────────────────────────────────────────
 user_data = {}
 
-def reset_user(uid):
-    db_ensure(uid)
-    db_update_daily(uid)
-    db_reset_weekly_if_needed(uid)
+def reset_user(uid, message=None):
+    # Pass Telegram profile info to users.py if available
+    if message and hasattr(message, 'from_user'):
+        u = message.from_user
+        user_ensure(
+            uid,
+            username=u.username or '',
+            first_name=u.first_name or '',
+            last_name=u.last_name or '',
+            language_code=u.language_code or 'ru'
+        )
+    else:
+        user_ensure(uid)
+
+    user_update_streak(uid)
+    user_reset_weekly_if_needed(uid)
+
     user_data[uid] = {
         'mode': None,
         'streak': 0,
-        'clean_streak': 0,        # consecutive correct with no wrong
+        'clean_streak': 0,
         'session_correct': 0,
         'session_wrong': 0,
         'session_mistakes': [],
@@ -364,7 +162,7 @@ def reset_user(uid):
         'irregular_data': None,
         'survival_lives': 3,
         'survival_q': 0,
-        'modes_played': set(),     # for all_modes achievement
+        'modes_played': set(),
     }
 
 def normalize(text):
@@ -413,12 +211,6 @@ def back_keyboard():
     m.add("Назад в меню", "📊 Статистика")
     return m
 
-def difficulty_keyboard():
-    m = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=3)
-    m.add("🟢 Легко", "🟡 Нормально", "🔴 Сложно")
-    m.add("Назад в меню")
-    return m
-
 def leaderboard_keyboard():
     m = types.InlineKeyboardMarkup(row_width=2)
     m.add(
@@ -444,8 +236,8 @@ def on_correct(uid, score_type):
     user_data[uid]['session_count'] += 1
     streak = user_data[uid]['streak']
     xp = get_xp(uid)
-    new_level = db_add_score(uid, **{score_type: 1, 'total': 1, 'xp': xp})
-    db_update_best_streak(uid, streak)
+    new_level = user_add_score(uid, **{score_type: 1, 'total': 1, 'xp': xp})
+    user_update_best_streak(uid, streak)
 
     msg = f"✅ Правильно! +1  (XP +{xp})"
     if streak > 1:
@@ -500,7 +292,7 @@ def check_translate(uid, text):
         return
     accepted = get_accepted_translations(verb)
     user_input = normalize(text)
-    correct = any(user_input == a or user_input in a or a in user_input for a in accepted)
+    correct = any(user_input == a for a in accepted)
     if correct:
         msg = on_correct(uid, 'translate')
     else:
@@ -598,7 +390,7 @@ def check_survival(uid, text):
         return
     accepted = get_accepted_translations(verb)
     user_input = normalize(text)
-    correct = any(user_input == a or user_input in a or a in user_input for a in accepted)
+    correct = any(user_input == a for a in accepted)
 
     if correct:
         user_data[uid]['survival_q'] += 1
@@ -606,8 +398,8 @@ def check_survival(uid, text):
         user_data[uid]['clean_streak'] = user_data[uid].get('clean_streak', 0) + 1
         q = user_data[uid]['survival_q']
         xp = get_xp(uid)
-        db_add_score(uid, total=1, translate=1, xp=xp)
-        db_update_best_streak(uid, user_data[uid]['streak'])
+        user_add_score(uid, total=1, translate=1, xp=xp)
+        user_update_best_streak(uid, user_data[uid]['streak'])
         lives = user_data[uid]['survival_lives']
         hearts = '❤️' * lives + '🖤' * (3 - lives)
         bot.send_message(uid, f"✅ Правильно! (XP +{xp})\n{hearts} | Вопросов: {q}")
@@ -663,9 +455,9 @@ def end_time_attack(uid):
     score = user_data[uid].get('time_attack_score', 0)
     user_data[uid]['time_attack_active'] = False
     user_data[uid]['mode'] = None
-    db_update_best_ta(uid, score)
-    row = db_get(uid)
-    best = row[12] if row else score
+    user_update_best_ta(uid, score)
+    row = user_get(uid)
+    best = row['best_time_attack'] if row else score
     emoji = "🏆" if score >= 20 else "💪"
     msg = f"⏱ *Время вышло!*\nПравильных ответов: *{score}* за 60 сек! {emoji}\n🏅 Рекорд: {best}"
     bot.send_message(uid, msg, reply_markup=main_menu_keyboard(), parse_mode='Markdown')
@@ -684,7 +476,7 @@ def check_ta(uid, text):
         return
     accepted = get_accepted_translations(verb)
     user_input = normalize(text)
-    correct = any(user_input == a or user_input in a or a in user_input for a in accepted)
+    correct = any(user_input == a for a in accepted)
     remaining = int(60 - elapsed)
     if correct:
         user_data[uid]['time_attack_score'] += 1
@@ -700,18 +492,14 @@ def reminder_loop():
     import datetime
     while True:
         now = datetime.datetime.now().strftime("%H:%M")
-        reminders = db_get_all_reminders()
-        for uid, reminder_time in reminders:
+        for uid, reminder_time in user_get_all_reminders():
             if reminder_time == now:
                 try:
-                    # Check if user practiced today
-                    row = db_get(uid)
-                    if row:
-                        last_active = row[9]
-                        if last_active != str(date.today()):
-                            bot.send_message(uid,
-                                "⏰ *Напоминание!*\nТы ещё не практиковался сегодня. Не теряй серию! 🔥",
-                                parse_mode='Markdown')
+                    row = user_get(uid)
+                    if row and row['last_active_date'] != str(date.today()):
+                        bot.send_message(uid,
+                            "⏰ *Напоминание!*\nТы ещё не практиковался сегодня. Не теряй серию! 🔥",
+                            parse_mode='Markdown')
                 except Exception:
                     pass
         time.sleep(60)
@@ -727,22 +515,21 @@ def word_of_day_loop():
     while True:
         now = datetime.datetime.now()
         today = str(date.today())
-        if now.hour == 9 and now.minute == 0:
-            if today not in sent_today:
-                sent_today.add(today)
-                verb = get_random_verb()
-                translation = ALL_STRICT_VERBS[verb]
-                category = VERB_TO_CATEGORY.get(verb, '')
-                cat_label = "Gerund (V-ing)" if category == 'gerund' else "Infinitive (to + V)"
-                msg = (f"📖 *Глагол дня:*\n\n"
-                       f"*{verb}* — {translation}\n"
-                       f"Форма: {cat_label}\n\n"
-                       f"_Зайди и попрактикуйся!_")
-                for uid in db_get_all_users():
-                    try:
-                        bot.send_message(uid, msg, parse_mode='Markdown')
-                    except Exception:
-                        pass
+        if now.strftime("%H:%M") == "09:00" and today not in sent_today:
+            sent_today.add(today)
+            verb = get_random_verb()
+            translation = ALL_STRICT_VERBS[verb]
+            category = VERB_TO_CATEGORY.get(verb, '')
+            cat_label = "Gerund (V-ing)" if category == 'gerund' else "Infinitive (to + V)"
+            msg = (f"📖 *Глагол дня:*\n\n"
+                   f"*{verb}* — {translation}\n"
+                   f"Форма: {cat_label}\n\n"
+                   f"_Зайди и попрактикуйся!_")
+            for uid in user_get_all_uids():
+                try:
+                    bot.send_message(uid, msg, parse_mode='Markdown')
+                except Exception:
+                    pass
         time.sleep(55)
 
 Thread(target=word_of_day_loop, daemon=True).start()
@@ -753,11 +540,11 @@ Thread(target=word_of_day_loop, daemon=True).start()
 @bot.message_handler(commands=['start'])
 def cmd_start(message):
     uid = message.chat.id
-    reset_user(uid)
-    daily_streak = db_update_daily(uid)
-    row = db_get(uid)
-    level = row[7] if row else 1
-    nickname = db_get_nickname(uid) or "не задан"
+    reset_user(uid, message)
+    row = user_get(uid)
+    level = row['level'] if row else 1
+    daily_streak = row['daily_streak'] if row else 1
+    nickname = row['nickname'] if row and row['nickname'] else "не задан"
     bot.send_message(uid,
         f"👋 Привет!\n\n🏅 Уровень: {get_level_name(level)}\n"
         f"✏️ Никнейм: {nickname}\n"
@@ -771,13 +558,14 @@ def cmd_admin(message):
     if uid != admin_id:
         bot.send_message(uid, "⛔ Нет доступа.")
         return
-    users = db_get_all_users()
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
+    c.execute("SELECT COUNT(*) FROM users")
+    total_users = c.fetchone()[0]
     c.execute("SELECT verb, SUM(wrong_count) as total FROM mistakes GROUP BY verb ORDER BY total DESC LIMIT 10")
     top_mistakes = c.fetchall()
     conn.close()
-    msg = f"👑 *Админ-панель*\n\n👥 Пользователей: {len(users)}\n\n📋 *Топ сложных глаголов:*\n"
+    msg = f"👑 *Админ-панель*\n\n👥 Пользователей: {total_users}\n\n📋 *Топ сложных глаголов:*\n"
     for verb, count in top_mistakes:
         msg += f"• *{verb}* — {count} ошибок\n"
     bot.send_message(uid, msg, parse_mode='Markdown')
@@ -786,7 +574,7 @@ def cmd_admin(message):
 def back_to_menu(message):
     uid = message.chat.id
     if uid not in user_data:
-        reset_user(uid)
+        reset_user(uid, message)
     user_data[uid]['mode'] = None
     user_data[uid]['time_attack_active'] = False
     bot.send_message(uid, "Главное меню:", reply_markup=main_menu_keyboard())
@@ -795,12 +583,28 @@ def back_to_menu(message):
 def main_handler(message):
     uid = message.chat.id
     text = message.text.strip()
+
     if uid not in user_data:
-        reset_user(uid)
+        reset_user(uid, message)
+    else:
+        # Always keep profile info fresh
+        u = message.from_user
+        user_ensure(uid,
+            username=u.username or '',
+            first_name=u.first_name or '',
+            last_name=u.last_name or '',
+            language_code=u.language_code or 'ru'
+        )
+
+    # Ban check
+    if user_is_banned(uid):
+        bot.send_message(uid, "⛔ Вы заблокированы.")
+        return
 
     # ── Никнейм ──
     if text == "✏️ Никнейм":
-        current = db_get_nickname(uid)
+        row = user_get(uid)
+        current = row['nickname'] if row and row['nickname'] else None
         msg = f"Текущий никнейм: *{current}*\n\n" if current else "У тебя пока нет никнейма.\n\n"
         msg += "Напиши новый никнейм (до 20 символов):"
         user_data[uid]['mode'] = 'set_nickname'
@@ -809,7 +613,7 @@ def main_handler(message):
 
     if user_data[uid].get('mode') == 'set_nickname':
         if 1 <= len(text) <= 20:
-            db_set_nickname(uid, text)
+            user_set_nickname(uid, text)
             user_data[uid]['mode'] = None
             bot.send_message(uid, f"✅ Никнейм установлен: *{text}*",
                              reply_markup=main_menu_keyboard(), parse_mode='Markdown')
@@ -819,9 +623,8 @@ def main_handler(message):
 
     # ── Reminder setup ──
     if user_data[uid].get('mode') == 'set_reminder':
-        import re
         if re.match(r'^\d{2}:\d{2}$', text):
-            db_set_reminder(uid, text)
+            user_set_reminder(uid, text)
             user_data[uid]['mode'] = None
             bot.send_message(uid, f"⏰ Напоминание установлено на *{text}*",
                              reply_markup=main_menu_keyboard(), parse_mode='Markdown')
@@ -831,35 +634,31 @@ def main_handler(message):
 
     # ── Статистика ──
     if text == "📊 Статистика":
-        row = db_get(uid)
+        row = user_get(uid)
         if not row:
             bot.send_message(uid, "Начни отвечать на вопросы!")
             return
-        uid2, total, tr, gi, qz, irr, xp, level, best_streak, last_date, daily_streak, nickname, best_ta, reminder, weekly, weekly_reset = row
+        xp = row['xp']
         xp_to_next = 100 - (xp % 100)
-        nick_line = f"✏️ Никнейм: *{nickname}*\n" if nickname else ""
-
-        # Weekly progress bar
+        nick_line = f"✏️ Никнейм: *{row['nickname']}*\n" if row['nickname'] else ""
         daily = db_get_daily_scores(uid, 7)
         chart = ""
         for d, s in daily:
-            day_label = d[-5:]
             bar = "█" * min(s // 5, 10)
-            chart += f"`{day_label}` {bar or '·'} {s}\n"
-
+            chart += f"`{d[-5:]}` {bar or '·'} {s}\n"
         achievements_count = len(db_get_achievements(uid))
         bot.send_message(uid,
             f"📊 *Статистика:*\n\n"
             f"{nick_line}"
-            f"🏅 {get_level_name(level)}\n"
+            f"🏅 {get_level_name(row['level'])}\n"
             f"⚡ XP: {xp} (до след. уровня: {xp_to_next})\n"
-            f"📅 Дней подряд: {daily_streak}\n"
-            f"🔥 Лучшая серия: {best_streak}\n"
-            f"⏱ Рекорд таймер-атаки: {best_ta}\n"
+            f"📅 Дней подряд: {row['daily_streak']}\n"
+            f"🔥 Лучшая серия: {row['best_streak']}\n"
+            f"⏱ Рекорд таймер-атаки: {row['best_time_attack']}\n"
             f"🏅 Достижений: {achievements_count}/{len(ACHIEVEMENTS)}\n\n"
-            f"🎯 Всего: {total} | 📅 Неделя: {weekly}\n"
-            f"📝 Перевод: {tr}  |  🔄 Gerund/Inf: {gi}\n"
-            f"🎯 Викторина: {qz}  |  📚 Irregular: {irr}\n\n"
+            f"🎯 Всего: {row['total_score']} | 📅 Неделя: {row['weekly_score']}\n"
+            f"📝 Перевод: {row['translate_score']}  |  🔄 Gerund/Inf: {row['ger_inf_score']}\n"
+            f"🎯 Викторина: {row['quiz_score']}  |  📚 Irregular: {row['irregular_score']}\n\n"
             f"📈 *График за 7 дней:*\n{chart}",
             parse_mode='Markdown')
         return
@@ -869,10 +668,8 @@ def main_handler(message):
         earned = db_get_achievements(uid)
         msg = "🏅 *Достижения:*\n\n"
         for key, (name, desc) in ACHIEVEMENTS.items():
-            if key in earned:
-                msg += f"✅ {name} — _{desc}_\n"
-            else:
-                msg += f"🔒 {name} — _{desc}_\n"
+            mark = "✅" if key in earned else "🔒"
+            msg += f"{mark} {name} — _{desc}_\n"
         bot.send_message(uid, msg, parse_mode='Markdown')
         return
 
@@ -897,8 +694,8 @@ def main_handler(message):
     # ── Настройки ──
     if text == "⚙️ Настройки":
         diff = user_data[uid].get('difficulty', 'normal')
-        row = db_get(uid)
-        reminder = row[13] if row else ''
+        row = user_get(uid)
+        reminder = row['reminder_time'] if row else ''
         reminder_line = f"⏰ Напоминание: {reminder}" if reminder else "⏰ Напоминание: не задано"
         bot.send_message(uid,
             f"⚙️ Сложность: *{diff}*\n{reminder_line}\n\n"
@@ -913,7 +710,7 @@ def main_handler(message):
         return
 
     if text == "❌ Убрать напоминание":
-        db_set_reminder(uid, '')
+        user_set_reminder(uid, '')
         bot.send_message(uid, "✅ Напоминание удалено.", reply_markup=main_menu_keyboard())
         return
 
@@ -983,18 +780,18 @@ def callback_query(call):
     # ── Leaderboard tabs ──
     if call.data in ("lb_alltime", "lb_weekly"):
         weekly = call.data == "lb_weekly"
-        rows = db_leaderboard(weekly=weekly)
+        rows = user_leaderboard(weekly=weekly)
         title = "📅 Топ за неделю" if weekly else "🏆 Топ всех времён"
         if not rows:
             bot.answer_callback_query(call.id, "Лидерборд пуст!")
             return
         medals = ["🥇", "🥈", "🥉"]
         msg = f"*{title}:*\n\n"
-        for i, (u, score, level) in enumerate(rows):
+        for i, row in enumerate(rows):
             medal = medals[i] if i < 3 else f"{i+1}."
-            nickname = db_get_nickname(u) or f"Игрок {str(u)[-4:]}"
-            marker = " ← ты" if u == uid else ""
-            msg += f"{medal} *{nickname}* — {get_level_name(level)} — {score} очков{marker}\n"
+            name = user_display_name(row)
+            marker = " ← ты" if row['uid'] == uid else ""
+            msg += f"{medal} *{name}* — {get_level_name(row['level'])} — {row['score']} очков{marker}\n"
         bot.edit_message_text(msg, uid, call.message.message_id,
                               parse_mode='Markdown', reply_markup=leaderboard_keyboard())
         bot.answer_callback_query(call.id)
@@ -1024,7 +821,7 @@ def callback_query(call):
             bot.answer_callback_query(call.id, "✅ Верно!")
             bot.send_message(uid, msg, parse_mode='Markdown')
         else:
-            on_wrong(uid, selected, correct)
+            on_wrong(uid, correct, correct)  # log the correct verb as the mistake
             bot.answer_callback_query(call.id, f"❌ Ответ: {correct}")
         maybe_summary(uid)
         send_quiz_q(uid)
