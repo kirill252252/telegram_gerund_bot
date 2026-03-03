@@ -16,7 +16,6 @@ from users import (
     user_update_best_ta, user_reset_weekly_if_needed,
     user_set_nickname, user_set_reminder, user_get_all_reminders,
     user_leaderboard, user_display_name,
-    db_give_achievement, db_get_achievements,
     DB_PATH
 )
 
@@ -63,6 +62,34 @@ def db_get_daily_scores(uid, days=7):
 # ─────────────────────────────────────────────
 # ACHIEVEMENTS
 # ─────────────────────────────────────────────
+# ─────────────────────────────────────────────
+# ACHIEVEMENT DB HELPERS
+# ─────────────────────────────────────────────
+
+def db_give_achievement(uid, key):
+    """Returns True if this is a NEW achievement."""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT 1 FROM achievements WHERE uid=? AND achievement=?", (uid, key))
+    exists = c.fetchone()
+    if not exists:
+        c.execute("INSERT INTO achievements(uid,achievement,earned_at) VALUES(?,?,?)",
+                  (uid, key, str(date.today())))
+        conn.commit()
+        conn.close()
+        return True
+    conn.close()
+    return False
+
+def db_get_achievements(uid):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT achievement FROM achievements WHERE uid=?", (uid,))
+    rows = c.fetchall()
+    conn.close()
+    return [r[0] for r in rows]
+
+
 ACHIEVEMENTS = {
     'first_correct':  ('🌟 Первый шаг',   'Ответь правильно 1 раз'),
     'score_100':      ('💯 Сотня',         'Набери 100 очков'),
