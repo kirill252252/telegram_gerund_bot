@@ -538,19 +538,30 @@ def _is_admin(uid):
 @bot.message_handler(commands=['admin'])
 def cmd_admin(message):
     uid = message.chat.id
+    if ADMIN_ID == 0:
+        bot.send_message(uid,
+            f"⚠️ ADMIN\\_ID не задан.\n"
+            f"Твой Telegram ID: `{uid}`\n"
+            f"Установи переменную: `export ADMIN_ID={uid}`",
+            parse_mode='Markdown')
+        return
     if not _is_admin(uid):
         bot.send_message(uid, "⛔ Нет доступа.")
         return
-    s = db_stats_summary()
-    msg = (f"👑 *Админ-панель*\n\n"
-           f"👥 Пользователей: {s['users']}\n"
-           f"🏅 Достижений выдано: {s['achievements']}\n"
-           f"📋 Ошибок записано: {s['mistakes_total']}\n\n"
-           f"📋 *Топ сложных глаголов:*\n")
-    for verb, count in s['top_mistakes']:
-        msg += f"• *{verb}* — {count} ошибок\n"
-    msg += "\n📥 /db — скачать БД\n📣 /broadcast <текст> — рассылка"
-    bot.send_message(uid, msg, parse_mode='Markdown')
+    try:
+        s = db_stats_summary()
+        msg = (f"👑 *Админ-панель*\n\n"
+               f"👥 Пользователей: {s['users']}\n"
+               f"🏅 Достижений выдано: {s['achievements']}\n"
+               f"📋 Ошибок записано: {s['mistakes_total']}\n\n"
+               f"📋 *Топ сложных глаголов:*\n")
+        for verb, count in s['top_mistakes']:
+            msg += f"• *{verb}* — {count} ошибок\n"
+        msg += "\n📥 /db — скачать БД\n📣 /broadcast <текст> — рассылка"
+        bot.send_message(uid, msg, parse_mode='Markdown')
+    except Exception as e:
+        logging.exception("Admin panel error")
+        bot.send_message(uid, f"❌ Ошибка: `{e}`", parse_mode='Markdown')
 
 
 @bot.message_handler(commands=['db'])
