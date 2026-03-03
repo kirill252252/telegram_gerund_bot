@@ -390,10 +390,10 @@ def db_export_path() -> str:
 
 
 def db_stats_summary() -> dict:
-    """Return a dict of high-level stats for the admin panel."""
     with _lock:
         con = _conn()
         cur = con.cursor()
+        
         cur.execute("SELECT COUNT(*) AS cnt FROM users")
         users = cur.fetchone()["cnt"]
 
@@ -404,11 +404,17 @@ def db_stats_summary() -> dict:
         row = cur.fetchone()
         mistakes_total = row["total"] or 0
 
-        top_mistakes = db_get_global_top_mistakes(10)   # re-uses same lock — would deadlock!
+        cur.execute('''
+            SELECT verb, SUM(wrong_count) AS total
+            FROM mistakes
+            GROUP BY verb
+            ORDER BY total DESC
+            LIMIT 10
+        ''')
+        top_mistakes = [(r["verb"], r["total"]) for r in cur.fetchall()]
+        
         con.close()
 
-    # Re-query top mistakes outside the lock to avoid the re-entrant deadlock
-    top_mistakes = db_get_global_top_mistakes(10)
     return {
         "users": users,
         "achievements": ach,
